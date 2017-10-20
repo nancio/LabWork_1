@@ -1,6 +1,7 @@
 #include "stdafx.h"
 #include<stdio.h>
 #include <stdbool.h>
+#include <time.h>
 
 #include <conio.h>
 #include "NIDAQmx.h"
@@ -25,7 +26,7 @@ typedef struct {
 
 typedef struct {
 	bool ocupado;
-	struct tm validade;
+	time_t validade;
 } palete;
 
 //mailboxes
@@ -35,15 +36,19 @@ xQueueHandle mbx_xz;
 xQueueHandle mbx_input;
 xQueueHandle mbx_button;
 xQueueHandle mbx_input_switch;
+xQueueHandle mbx_pallet_in;
+xQueueHandle mbx_expired;
 
 //semahores
 xSemaphoreHandle sem_x_done;
 xSemaphoreHandle sem_z_done;
 xSemaphoreHandle put_done;
 xSemaphoreHandle take_done;
+xSemaphoreHandle put_start;
+xSemaphoreHandle take_start;
 
 
-
+palete matriz[2][2] = {0};
 
 
 
@@ -493,6 +498,65 @@ void task_storage_services(void *param)
 	}   // end while
 }
 
+void manage_expiration_task(void *param)
+{
+	time_t rawtime;
+	int i = 1;
+	int j = 1;
+	int time_val = 0;
+	int c;
+	
+
+	while(true)
+	{
+			time(&rawtime);
+			time_val = difftime(rawtime, matriz[i][j].validade);
+			if (time_val > 60 && matriz[i][j].ocupado)
+			{
+				//xQueueSend(mbx_expired, &c, portMAX_DELAY);
+				printf("time is there %d \n", time_val);
+			}
+			i++;
+			if(i==4)
+			{
+				i = 1;
+				j++;
+				if (j == 4) {
+					i = 1;
+					j = 1;
+				}
+			}
+			
+	}
+
+	
+}
+
+void add_pallet_matriz_task(void *param)
+{
+	int x;
+	int z;
+	TPosition pos;
+	time_t rawtime;
+	struct tm * timeinfo;
+	 
+	while (true)
+	{
+		xQueueReceive(mbx_pallet_in, &pos, portMAX_DELAY);
+		printf("HELOOOOOOOOOO");
+		time(&rawtime);
+	
+		x = pos.x;
+		z = pos.z;
+
+		taskENTER_CRITICAL();
+		//matriz[x-1][z-1].ocupado = true;
+		//matriz[x-1][z-1].validade = rawtime;
+		
+	}
+}
+
+
 void goto_x_task(void *param)
 {
 	while (true)
@@ -537,6 +601,7 @@ void put_task(void *param)
 	int x;
 	int pos_x;
 	int pos_y;
+	TPosition pos;
 	
 	
 	while (true)
@@ -547,7 +612,7 @@ void put_task(void *param)
 		int pos_x = 0;
 		int pos_z = 0;
 
-		xQueueReceive(mbx_input_switch, &x, portMAX_DELAY);
+		xSemaphoreTake(put_start, portMAX_DELAY);
 		vTaskDelay(100);
 		printf("INSIRA POS X (TEM 2 SEGUNDOS) \n");
 		while (i < 200)
@@ -605,8 +670,13 @@ void put_task(void *param)
 
 
 		goto_xz(pos_x, pos_z, true);
-		printf("q estas qui a fazer puta \n");
-		putPiece();
+		pos.x = pos_x;
+		pos.z = pos_z;
+		//printf("q estas qui a fazer puta \n");
+		xQueueSend(mbx_pallet_in, &pos, portMAX_DELAY);
+
+		//putPiece();
+		
 		xSemaphoreGive(put_done);
 	}
 }
@@ -624,7 +694,7 @@ void get_task(void *param)
 		int pos_x = 0;
 		int pos_z = 0;
 
-		xQueueReceive(mbx_input_switch, &x, portMAX_DELAY);
+		xSemaphoreTake(take_start, portMAX_DELAY);
 		vTaskDelay(100);
 		printf("INSIRA POS X (TEM 2 SEGUNDOS) \n");
 		while (i < 200)
@@ -684,7 +754,7 @@ void get_task(void *param)
 		goto_xz(pos_x, pos_z, true);
 		//printf("q estas qui a fazer puta \n");
 		get_piece();
-		xSemaphoreGive(put_done);
+		xSemaphoreGive(take_done);
 	}
 }
 
@@ -719,34 +789,7 @@ void manage_buttons_task(void *param)
 
 	}
 }
-/*void recive_button_press_task(void *param)
-{
-	while (true) 
-	{
-		
-		if (is_button_1_on())
-		{
-			printf("putas");
-			
-		}
-	    if (is_button_2_on())
-		{
-			xQueueSend(mbx_button, 2, portMAX_DELAY);
-		}
-		if(is_button_both_on())
-		{
-			xQueueSend(mbx_button, 3, portMAX_DELAY);
-		}
 
-		
-
-		
-		
-	}
-
-
-}
-*/
 void button_task(void *param)
 {
 	int i = 0;
@@ -757,14 +800,14 @@ void button_task(void *param)
 		if (getBitValue(vp1, 5))
 		{
 			i = 1;
-			xQueueSend(mbx_button, &i, portMAX_DELAY);
+			xSemaphoreGive(put_start);
 			xSemaphoreTake(put_done, portMAX_DELAY);
 			i = 0;
 		}
 		if (getBitValue(vp1, 6))
 		{
 			i = 2;
-			xQueueSend(mbx_button, &i, portMAX_DELAY);
+			xSemaphoreGive(take_start);
 			xSemaphoreTake(take_done, portMAX_DELAY);
 			i = 0;
 		}
@@ -777,6 +820,7 @@ void button_task(void *param)
 		}
 	}		
 }
+
 
 
 
@@ -801,6 +845,9 @@ void main(int argc, char **argv) {
 	sem_z_done = xSemaphoreCreateCounting(1000, 0);
 	put_done= xSemaphoreCreateCounting(1000, 0);
 	take_done = xSemaphoreCreateCounting(1000, 0);
+	put_start = xSemaphoreCreateCounting(1000, 0);
+	take_start = xSemaphoreCreateCounting(1000, 0);
+	
 
 
 	mbx_x = xQueueCreate(10, sizeof(int));
@@ -809,6 +856,8 @@ void main(int argc, char **argv) {
 	mbx_input = xQueueCreate(10, sizeof(int));
 	mbx_button = xQueueCreate(10, sizeof(int));
 	mbx_input_switch= xQueueCreate(10, sizeof(int));
+	mbx_pallet_in= xQueueCreate(10, sizeof(int));
+	mbx_expired= xQueueCreate(10, sizeof(int));
 
 	xTaskCreate(task_storage_services, "task_storage_services", 100, NULL, 0, NULL);
 	xTaskCreate(goto_x_task, "goto_x_task", 100, NULL, 0, NULL);
@@ -819,7 +868,8 @@ void main(int argc, char **argv) {
 	xTaskCreate(manage_buttons_task, "manage_buttons_task",100, NULL, 0, NULL);
 	xTaskCreate(put_task, "put_task", 100, NULL, 0, NULL);
 	xTaskCreate(get_task, "get_task", 100, NULL, 0, NULL);
-
+	xTaskCreate(manage_expiration_task, "manage_expiration_task", 100, NULL, 0, NULL);
+	xTaskCreate(add_pallet_matriz_task, "add_pallet_matriz_task", 100, NULL, 0, NULL);
 
 	callibration();
 
